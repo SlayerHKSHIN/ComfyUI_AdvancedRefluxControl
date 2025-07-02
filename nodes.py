@@ -97,11 +97,30 @@ def letterbox(img, mask, w, h, desiredSize):
         mask = letterbox.view(b,1,desiredSize,desiredSize)
     return (img, mask)
 
-def getBoundingBox(mask, w, h, relativeMargin, desiredSize):
-    mask=mask.view(h,w)
+def getBoundingBox(mask, h, w, relativeMargin, desiredSize):
+    # Flatten mask if it has batch dimension
+    if mask.dim() == 3:
+        mask = mask.squeeze(0)
+    # Try to reshape mask to (h, w)
+    total_elements = mask.numel()
+    expected_elements = h * w
+    if total_elements != expected_elements:
+        # If mask is already 2D but wrong shape, try to use it as is
+        if mask.dim() == 2:
+            h, w = mask.shape
+        else:
+            raise RuntimeError(f"Mask has {total_elements} elements but expected {expected_elements} (h={h}, w={w})")
+    else:
+        mask=mask.view(h,w)
     marginW = math.ceil(relativeMargin * w)
     marginH = math.ceil(relativeMargin * h)
     indices = torch.nonzero(mask, as_tuple=False)
+    
+    # Check if mask is empty (no non-zero values)
+    if indices.numel() == 0:
+        # Return the entire image bounds
+        return 0, 0, w, h
+    
     y_min, x_min = indices.min(dim=0).values
     y_max, x_max = indices.max(dim=0).values    
     x_min = max(0, x_min.item() - marginW)
@@ -163,7 +182,33 @@ def prepareImageAndMask(visionEncoder, image, mask, mode, autocrop_margin, desir
         (w,h) = (round(W*ratio), round(H*ratio))
         image, mask = letterbox(image, standardizeMask(mask), w, h, desiredSize)
     elif mode==2:
-        (bx,by,bx2,by2) = getBoundingBox(mask,W,H,autocrop_margin, desiredSize)
+        # Check if mask dimensions match image dimensions
+        if mask is not None:
+            mask_shape = mask.shape
+            # Remove batch dimension if present
+            if len(mask_shape) == 3:
+                _, mask_h, mask_w = mask_shape
+            elif len(mask_shape) == 2:
+                mask_h, mask_w = mask_shape
+            else:
+                raise ValueError(f"Unexpected mask shape: {mask_shape}")
+            
+            # If mask is smaller than image, upscale it
+            if mask_h != H or mask_w != W:
+                if len(mask_shape) == 3:
+                    mask = torch.nn.functional.interpolate(
+                        mask.unsqueeze(1).float(), 
+                        size=(H, W), 
+                        mode='nearest'
+                    ).squeeze(1)
+                else:
+                    mask = torch.nn.functional.interpolate(
+                        mask.unsqueeze(0).unsqueeze(0).float(), 
+                        size=(H, W), 
+                        mode='nearest'
+                    ).squeeze(0).squeeze(0)
+        
+        (bx,by,bx2,by2) = getBoundingBox(mask,H,W,autocrop_margin, desiredSize)
         image = image[:,by:by2,bx:bx2,:]
         mask = mask[:,by:by2,bx:bx2]
         imgsize = max(bx2-bx,by2-by)
